@@ -22,6 +22,7 @@ from logger import (
     build_decrypt_update,
     build_encrypt_row,
     build_standalone_decrypt_row,
+    build_verify_update,
     now_stamp,
 )
 from pipeline import TransformResult
@@ -130,6 +131,64 @@ class TransformWorker(threading.Thread):
             self._emit(("error", f"Terjadi kesalahan tak terduga: {error}"))
         else:
             self._emit(("done", result))
+
+
+class VerifyWorker(threading.Thread):
+    """Memeriksa kesamaan file (hash manual atau dua file) di thread terpisah."""
+
+    def __init__(
+        self,
+        emit: Callable[[tuple[str, object]], None],
+        mode: str,
+        first: Path,
+        second: Path | None = None,
+        expected: str | None = None,
+    ) -> None:
+        super().__init__(daemon=True, name=f"verify-{mode}")
+        self._emit = emit
+        self._mode = mode
+        self._first = first
+        self._second = second
+        self._expected = expected or ""
+
+    def _hash_payload(self, expected: str, actual: str) -> dict[str, object]:
+        return {
+            "mode": "hash",
+            "status": "COCOK" if actual == expected else "TIDAK_COCOK",
+            "hash_a": expected,
+            "hash_b": actual,
+            "differing_bytes": None,
+            "first_difference_offset": None,
+            "plain_hash": expected,
+            "decrypted_hash": actual,
+            "method_note": "verifikasi hash manual",
+        }
+
+    def run(self) -> None:
+        try:
+            if self._mode == "hash":
+                actual = metrics.sha256_file(self._first)
+                payload = self._hash_payload(self._expected.lower(), actual)
+            else:
+                assert self._second is not None
+                comparison = metrics.compare_files(self._first, self._second)
+                payload = {
+                    "mode": "files",
+                    "status": "COCOK" if comparison.hash_match else "TIDAK_COCOK",
+                    "hash_a": comparison.hash_a,
+                    "hash_b": comparison.hash_b,
+                    "differing_bytes": comparison.differing_bytes,
+                    "first_difference_offset": comparison.first_difference_offset,
+                    "plain_hash": comparison.hash_a,
+                    "decrypted_hash": comparison.hash_b,
+                    "method_note": "verifikasi dua file",
+                }
+        except (OSError, ValueError) as error:
+            self._emit(("error", describe_error(self._first, error)))
+        except Exception as error:  # jaring pengaman agar UI tidak menunggu selamanya
+            self._emit(("error", f"Terjadi kesalahan tak terduga: {error}"))
+        else:
+            self._emit(("verify", payload))
 
 
 class FilePanel(ttk.LabelFrame):
@@ -489,13 +548,6 @@ class AffineApp(tk.Tk):
             )
         self._update_status()
 
-    def _not_ready(self, feature: str) -> None:
-        messagebox.showinfo(
-            "Belum tersedia",
-            f"Fitur {feature} diisi pada tahap implementasi berikutnya.",
-            parent=self,
-        )
-
     def _set_busy(self, busy: bool) -> None:
         """Menonaktifkan tombol aksi selama pemrosesan berjalan."""
         state = "disabled" if busy else "normal"
@@ -524,8 +576,18 @@ class AffineApp(tk.Tk):
             self._worker = None
             self._job = None
             self._set_busy(False)
-            self._set_status(str(payload), operation)
+            if operation == "verify":
+                self.verify_status.set("Pemeriksaan gagal.")
+            else:
+                self._set_status(str(payload), operation)
             messagebox.showerror("Operasi gagal", str(payload), parent=self)
+            return
+        if kind == "verify":
+            self._worker = None
+            self._job = None
+            self._set_busy(False)
+            assert isinstance(payload, dict)
+            self._finish_verify(payload)
             return
         # kind == "done"
         self._worker = None
@@ -722,7 +784,91 @@ class AffineApp(tk.Tk):
         self._warn_if_log_failed()
 
     def _on_verify(self) -> None:
-        self._not_ready("verifikasi")
+        if self._worker is not None:
+            return
+        if self.verify_mode.get() == "hash":
+            typed = self.verify_hash_var.get().strip()
+            if not metrics.is_valid_sha256_hex(typed):
+                messagebox.showerror(
+                    "Hash tidak valid",
+                    "Hash SHA-256 harus terdiri dari 64 karakter hex (0-9, a-f).",
+                    parent=self,
+                )
+                return
+            target = self.verify_result_file.path
+            if target is None:
+                messagebox.showinfo(
+                    "Belum ada file",
+                    "Pilih file hasil dekripsi yang akan diperiksa.",
+                    parent=self,
+                )
+                return
+            self._start_verify(
+                VerifyWorker(self.events.put, "hash", target, expected=typed)
+            )
+            return
+
+        original = self.verify_original.path
+        result = self.verify_result_file.path
+        if original is None or result is None:
+            messagebox.showinfo(
+                "Belum ada file",
+                "Pilih file asli dan file hasil dekripsi terlebih dahulu.",
+                parent=self,
+            )
+            return
+        self._start_verify(VerifyWorker(self.events.put, "files", original, second=result))
+
+    def _start_verify(self, worker: VerifyWorker) -> None:
+        self._job = {"operation": "verify"}
+        self.verify_status.set("Memeriksa…")
+        self._set_verify_text("")
+        self._set_busy(True)
+        self._worker = worker
+        self._worker.start()
+
+    def _verify_report(self, data: Mapping[str, object]) -> str:
+        lines = [f"Status: {data['status']}"]
+        if data["mode"] == "hash":
+            lines.append(f"Hash yang ditempel : {data['hash_a']}")
+            lines.append(f"Hash file          : {data['hash_b']}")
+        else:
+            lines.append(f"Hash file asli     : {data['hash_a']}")
+            lines.append(f"Hash file dekripsi : {data['hash_b']}")
+            if data["differing_bytes"] == 0:
+                lines.append("Isi file           : identik byte-per-byte, tidak ada perbedaan.")
+            else:
+                lines.append(f"Byte berbeda       : {data['differing_bytes']}")
+                lines.append(f"Offset pertama     : {data['first_difference_offset']}")
+        return "\n".join(lines)
+
+    def _finish_verify(self, data: Mapping[str, object]) -> None:
+        status = str(data["status"])
+        self._set_verify_text(self._verify_report(data))
+        row_index = self.log.find_for_verification(
+            str(data["plain_hash"]), str(data["decrypted_hash"])
+        )
+        if row_index is None:
+            self.verify_status.set(
+                "Pemeriksaan selesai, tetapi hasilnya tidak dapat dipasangkan ke percobaan mana pun."
+            )
+            messagebox.showinfo(
+                "Tidak dapat dipasangkan",
+                "Hasil pemeriksaan tidak dapat dipasangkan ke percobaan mana pun, "
+                "sehingga CSV tidak diubah. Pastikan file yang diperiksa adalah hasil "
+                "dekripsi yang tercatat di CSV.",
+                parent=self,
+            )
+            return
+        update = build_verify_update(
+            self.log.rows[row_index], status, str(data["method_note"])
+        )
+        self.log.update(row_index, update)
+        self.verify_status.set(
+            f"Pemeriksaan selesai: {status} — baris {row_index + 1} diperbarui "
+            f"(Operasi={update['Operasi']})."
+        )
+        self._warn_if_log_failed()
 
 
 if __name__ == "__main__":
