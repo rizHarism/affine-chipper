@@ -17,7 +17,13 @@ from tkinter import filedialog, messagebox, ttk
 import metrics
 import pipeline
 from affine_cipher import validate_keys
-from logger import ResultLog, build_encrypt_row, now_stamp
+from logger import (
+    ResultLog,
+    build_decrypt_update,
+    build_encrypt_row,
+    build_standalone_decrypt_row,
+    now_stamp,
+)
 from pipeline import TransformResult
 
 APP_TITLE = "Affine Cipher — Enkripsi & Dekripsi File"
@@ -653,10 +659,67 @@ class AffineApp(tk.Tk):
         self._warn_if_log_failed()
 
     def _on_decrypt(self) -> None:
-        self._not_ready("dekripsi")
+        if self._worker is not None:
+            return
+        src = self.decrypt_file.path
+        if src is None:
+            messagebox.showinfo(
+                "Belum ada file",
+                "Pilih file terenkripsi (.enc) yang akan didekripsi terlebih dahulu.",
+                parent=self,
+            )
+            return
+        keys = self.decrypt_keys.read()
+        if keys is None:
+            return
+        a, b = keys
+        self._begin_transform(
+            "decrypt",
+            src,
+            pipeline.output_names(src, "dec"),
+            a,
+            b,
+            self.decrypt_note.value(),
+        )
 
     def _finish_decrypt(self, result: TransformResult, job: Mapping[str, object]) -> None:
-        self._not_ready("dekripsi")
+        a = int(job["a"])  # type: ignore[arg-type]
+        b = int(job["b"])  # type: ignore[arg-type]
+        note = str(job["note"])
+
+        row_index = self.log.find_for_decryption(result.hash_plain, a, b)
+        if row_index is None:
+            data = build_standalone_decrypt_row(result, a, b, now_stamp(), note)
+            self.log.add_trial(data)
+            message = (
+                "Dekripsi selesai. Tidak ada baris enkripsi yang cocok, jadi hasil ini "
+                "dicatat sebagai baris Dekripsi baru. Hasil belum diverifikasi."
+            )
+        else:
+            data = build_decrypt_update(result, a, b, note)
+            self.log.update(row_index, data)
+            message = (
+                f"Dekripsi selesai — kolom dekripsi baris {row_index + 1} terisi. "
+                "Hasil belum diverifikasi."
+            )
+
+        self.decrypt_progress["value"] = 100
+        self.decrypt_cards.show(
+            {
+                "waktu": data["Waktu_Dekripsi_Detik"],
+                "throughput": data["Throughput_Dekripsi_MBps"],
+                "entropi_cipher": f"{result.entropy_cipher:.4f}",
+                "entropi_plain": f"{result.entropy_plain:.4f}",
+                "cpu": data["CPU_Usage_Dekripsi_Persen"],
+                "ram": data["RAM_Usage_Dekripsi_MB"],
+                "ukuran_asli": str(result.cipher_size),
+                "ukuran_hasil": str(result.plain_size),
+                "output": str(result.output_path),
+                "hash": data["Hash_SHA256_Dekripsi"],
+            }
+        )
+        self.decrypt_status.set(message)
+        self._warn_if_log_failed()
 
     def _on_verify(self) -> None:
         self._not_ready("verifikasi")
