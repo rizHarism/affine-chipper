@@ -109,5 +109,58 @@ class TestResultLog(unittest.TestCase):
             self.assertIsNone(log.last_error)
 
 
+class TestRowMatching(unittest.TestCase):
+    def test_decryption_matches_hash_and_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "hash-a", "Kunci_a": "7", "Kunci_b": "13"})
+            log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "hash-a", "Kunci_a": "9", "Kunci_b": "13"})
+            self.assertEqual(log.find_for_decryption("hash-a", 9, 13), 1)
+            self.assertEqual(log.find_for_decryption("hash-a", 7, 13), 0)
+
+    def test_decryption_wrong_key_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "hash-a", "Kunci_a": "7", "Kunci_b": "13"})
+            self.assertIsNone(log.find_for_decryption("hash-sampah", 7, 14))
+
+    def test_decryption_prefers_oldest_unfilled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            for _ in range(2):
+                log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "h", "Kunci_a": "7", "Kunci_b": "13"})
+            self.assertEqual(log.find_for_decryption("h", 7, 13), 0)
+            log.update(0, {"Hash_SHA256_Dekripsi": "h"})
+            self.assertEqual(log.find_for_decryption("h", 7, 13), 1)
+
+    def test_verification_prefers_row_without_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            for _ in range(2):
+                log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "h", "Kunci_a": "7", "Kunci_b": "13"})
+                log.update(len(log.rows) - 1, {"Hash_SHA256_Dekripsi": "h", "Operasi": "Enkripsi+Dekripsi"})
+            log.update(0, {"Status_Hash_Cocok": "COCOK", "Operasi": "Enkripsi+Dekripsi+Verifikasi"})
+            self.assertEqual(log.find_for_verification("h", "h"), 1)
+
+    def test_verification_wrong_key_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            log.add_trial(
+                {
+                    "Nama_File": "a.pdf",
+                    "Hash_SHA256_Asli": "-",
+                    "Hash_SHA256_Dekripsi": "sampah",
+                    "Operasi": "Dekripsi",
+                }
+            )
+            self.assertEqual(log.find_for_verification("h-asli", "sampah"), 0)
+
+    def test_verification_unmatched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "h"})
+            self.assertIsNone(log.find_for_verification("lain", "lain2"))
+
+
 if __name__ == "__main__":
     unittest.main()
