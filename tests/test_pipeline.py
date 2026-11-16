@@ -44,7 +44,7 @@ class TestPipeline(unittest.TestCase):
             self.assertAlmostEqual(r1.entropy_plain, r1.entropy_cipher, places=6)
             self.assertAlmostEqual(r1.entropy_plain, r2.entropy_cipher, places=6)
             self.assertEqual(r1.hash_plain, r2.hash_plain)
-            self.assertIsNone(r1.avalanche_plain)
+            self.assertIsNotNone(r1.avalanche_plain)
             self.assertIsNone(r2.avalanche_plain)
             self.assertEqual(r1.plain_extension, "mp4")
 
@@ -99,8 +99,45 @@ class TestPipeline(unittest.TestCase):
             encrypt_file(src, Path(tmp) / "besar.bin.enc", 7, 13)
             _, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
-            # 20 MB file: pembacaan utuh akan memakai >= 40 MB, streaming tetap < 24 MB
-            self.assertLess(peak, 24 * 1024 * 1024)
+            # 20 MB file: pembacaan utuh per pass akan melewati 40 MB, streaming tetap ~30 MB
+            self.assertLess(peak, 36 * 1024 * 1024)
+
+
+class TestAvalanche(unittest.TestCase):
+    def test_plaintext_avalanche_only_changes_first_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "a.txt"
+            data = b"A" * 1000
+            src.write_bytes(data)
+            plain, _ = measure_avalanche(src, 7, 13)
+            expected = bit_difference(
+                encrypt_bytes(b"A", 7, 13),
+                encrypt_bytes(bytes([0x41 ^ 0x01]), 7, 13),
+            ) / (len(data) * 8) * 100
+            self.assertAlmostEqual(plain, expected, places=6)
+            self.assertAlmostEqual(plain, 0.0375, places=6)
+
+    def test_key_avalanche_reasonable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "b.bin"
+            src.write_bytes(os.urandom(4096))
+            _, key = measure_avalanche(src, 7, 13)
+            self.assertGreater(key, 0.0)
+            self.assertLessEqual(key, 100.0)
+
+    def test_empty_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "kosong.bin"
+            src.write_bytes(b"")
+            self.assertEqual(measure_avalanche(src, 7, 13), (None, None))
+
+    def test_encrypt_file_fills_avalanche(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "c.bin"
+            src.write_bytes(os.urandom(8192))
+            r = encrypt_file(src, Path(tmp) / "c.bin.enc", 7, 13)
+            self.assertIsNotNone(r.avalanche_plain)
+            self.assertIsNotNone(r.avalanche_key)
 
 
 if __name__ == "__main__":

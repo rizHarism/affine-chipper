@@ -11,6 +11,7 @@ from typing import Callable
 from affine_cipher import apply_table, build_decrypt_table, build_encrypt_table
 from metrics import (
     Sha256Accumulator,
+    bit_difference,
     cpu_percent,
     entropy_from_counts,
     ram_mb,
@@ -125,6 +126,40 @@ def _run(
     )
 
 
+def measure_avalanche(src: Path, a: int, b: int) -> tuple[float | None, float | None]:
+    """Menghitung avalanche plainteks dan kunci dalam persen (streaming).
+
+    Pass plainteks: byte pertama di-XOR 0x01. Pass kunci: ``b' = b ^ 0x01``.
+    Kedua pass tidak masuk hitungan ``transform_seconds``.
+    """
+    source_size = src.stat().st_size
+    if source_size == 0:
+        return (None, None)
+
+    table = build_encrypt_table(a, b)
+    key_table = build_encrypt_table(a, b ^ 0x01)
+    diff_plain = 0
+    diff_key = 0
+    first_chunk = True
+
+    with open(src, "rb") as handle:
+        while True:
+            chunk = handle.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            if first_chunk:
+                flipped = bytes((chunk[0] ^ 0x01,)) + chunk[1:]
+                first_chunk = False
+            else:
+                flipped = chunk
+            original = apply_table(chunk, table)
+            diff_plain += bit_difference(original, apply_table(flipped, table))
+            diff_key += bit_difference(original, apply_table(chunk, key_table))
+
+    total_bits = source_size * 8
+    return (diff_plain / total_bits * 100, diff_key / total_bits * 100)
+
+
 def encrypt_file(
     src: Path,
     dst: Path,
@@ -137,6 +172,7 @@ def encrypt_file(
     plain_size, cipher_size, seconds, entropy_plain, entropy_cipher, hash_plain, hash_cipher, cpu, ram = _run(
         src, dst, table, progress
     )
+    avalanche_plain, avalanche_key = measure_avalanche(src, a, b)
     plain_name, plain_extension = _plain_identity(src)
     return TransformResult(
         plain_name=plain_name,
@@ -147,8 +183,8 @@ def encrypt_file(
         throughput_mbps=throughput_mbps(plain_size, seconds),
         entropy_plain=entropy_plain,
         entropy_cipher=entropy_cipher,
-        avalanche_plain=None,
-        avalanche_key=None,
+        avalanche_plain=avalanche_plain,
+        avalanche_key=avalanche_key,
         cpu_percent=cpu,
         ram_mb=ram,
         hash_plain=hash_plain,
