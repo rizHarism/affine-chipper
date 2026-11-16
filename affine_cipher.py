@@ -49,3 +49,50 @@ def validate_keys(a: int, b: int) -> tuple[bool, str]:
     if not 0 <= b <= 255:
         return False, f"Kunci b={b} di luar rentang 0-255."
     return True, ""
+
+
+def _require_valid_keys(a: int, b: int) -> None:
+    ok, message = validate_keys(a, b)
+    if not ok:
+        raise ValueError(message)
+
+
+def build_encrypt_table(a: int, b: int) -> bytes:
+    """Tabel substitusi 256 entri: ``table[p] = (a*p + b) mod 256``."""
+    _require_valid_keys(a, b)
+    return bytes((a * p + b) % MODULUS for p in range(MODULUS))
+
+
+def build_decrypt_table(a: int, b: int) -> bytes:
+    """Tabel invers: ``table[c] = a^-1 * (c - b) mod 256``."""
+    _require_valid_keys(a, b)
+    inverse = mod_inverse(a, MODULUS)
+    return bytes((inverse * (c - b)) % MODULUS for c in range(MODULUS))
+
+
+def apply_table(data: bytes, table: bytes) -> bytes:
+    """Menerapkan tabel substitusi 256 entri pada data (dieksekusi di C)."""
+    return data.translate(table)
+
+
+def encrypt_bytes(data: bytes, a: int, b: int) -> bytes:
+    """Enkripsi byte dengan tabel rumus affine."""
+    return apply_table(data, build_encrypt_table(a, b))
+
+
+def decrypt_bytes(data: bytes, a: int, b: int) -> bytes:
+    """Dekripsi byte dengan tabel invers affine."""
+    return apply_table(data, build_decrypt_table(a, b))
+
+
+def encrypt_reference(data: bytes, a: int, b: int) -> bytes:
+    """Implementasi referensi: loop per byte, langsung dari rumus."""
+    _require_valid_keys(a, b)
+    return bytes((a * p + b) % MODULUS for p in data)
+
+
+def decrypt_reference(data: bytes, a: int, b: int) -> bytes:
+    """Implementasi referensi: loop per byte dengan balikan modular."""
+    _require_valid_keys(a, b)
+    inverse = mod_inverse(a, MODULUS)
+    return bytes((inverse * (c - b)) % MODULUS for c in data)
