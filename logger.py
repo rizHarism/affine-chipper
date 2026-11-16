@@ -176,7 +176,7 @@ def build_encrypt_row(
             "Kunci_a": str(a),
             "Kunci_b": str(b),
             "Operasi": "Enkripsi",
-            "Waktu_Enkripsi_Detik": empty_cell(result.transform_seconds, 4),
+            "Waktu_Enkripsi_Detik": empty_cell(result.transform_seconds, 6),
             "Throughput_Enkripsi_MBps": empty_cell(result.throughput_mbps, 2),
             "Entropi_Plainteks": empty_cell(result.entropy_plain, 4),
             "Entropi_Cipherteks": empty_cell(result.entropy_cipher, 4),
@@ -200,7 +200,7 @@ def build_decrypt_update(
     """Kolom yang diperbarui pada baris percobaan saat dekripsi berhasil dipasangkan."""
     update = {
         "Operasi": "Enkripsi+Dekripsi",
-        "Waktu_Dekripsi_Detik": empty_cell(result.transform_seconds, 4),
+        "Waktu_Dekripsi_Detik": empty_cell(result.transform_seconds, 6),
         "Throughput_Dekripsi_MBps": empty_cell(result.throughput_mbps, 2),
         "CPU_Usage_Dekripsi_Persen": empty_cell(result.cpu_percent, 2),
         "RAM_Usage_Dekripsi_MB": empty_cell(result.ram_mb, 2),
@@ -231,7 +231,7 @@ def build_standalone_decrypt_row(
             "Kunci_a": str(a),
             "Kunci_b": str(b),
             "Operasi": "Dekripsi",
-            "Waktu_Dekripsi_Detik": empty_cell(result.transform_seconds, 4),
+            "Waktu_Dekripsi_Detik": empty_cell(result.transform_seconds, 6),
             "Throughput_Dekripsi_MBps": empty_cell(result.throughput_mbps, 2),
             "Entropi_Plainteks": empty_cell(result.entropy_plain, 4),
             "Entropi_Cipherteks": empty_cell(result.entropy_cipher, 4),

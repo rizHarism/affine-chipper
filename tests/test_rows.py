@@ -42,7 +42,7 @@ class TestEncryptRow(unittest.TestCase):
         self.assertEqual(row["Ekstensi"], "pdf")
         self.assertEqual(row["Ukuran_Asli_Byte"], "1048576")
         self.assertEqual(row["Tambahan_Ukuran_Persen"], "0.00")
-        self.assertEqual(row["Waktu_Enkripsi_Detik"], "0.0020")
+        self.assertEqual(row["Waktu_Enkripsi_Detik"], "0.001953")
         self.assertEqual(row["Throughput_Enkripsi_MBps"], "512.00")
         self.assertEqual(row["Entropi_Plainteks"], "7.5000")
         self.assertEqual(row["Avalanche_Kunci_Persen"], "19.2500")
@@ -76,7 +76,7 @@ class TestDecryptRows(unittest.TestCase):
         self.assertLessEqual(set(update), allowed)
         self.assertEqual(update["Operasi"], "Enkripsi+Dekripsi")
         self.assertEqual(update["Hash_SHA256_Dekripsi"], "h-plain")
-        self.assertEqual(update["Waktu_Dekripsi_Detik"], "0.0020")
+        self.assertEqual(update["Waktu_Dekripsi_Detik"], "0.001953")
         self.assertNotIn("Catatan_Pengujian", update)
 
     def test_decrypt_update_keeps_note_when_given(self):
@@ -95,7 +95,7 @@ class TestDecryptRows(unittest.TestCase):
         self.assertEqual(row["Hash_SHA256_Asli"], "-")
         self.assertEqual(row["Hash_SHA256_Dekripsi"], "h-plain")
         self.assertEqual(row["Waktu_Enkripsi_Detik"], "-")
-        self.assertEqual(row["Waktu_Dekripsi_Detik"], "0.0020")
+        self.assertEqual(row["Waktu_Dekripsi_Detik"], "0.001953")
         self.assertEqual(row["Avalanche_Plainteks_Persen"], "-")
         self.assertEqual(row["Catatan_Pengujian"], "kunci salah")
 
