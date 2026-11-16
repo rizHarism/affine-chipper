@@ -123,7 +123,10 @@ class TransformWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            transform = pipeline.encrypt_file if self._operation == "encrypt" else pipeline.decrypt_file
+            if self._operation == "encrypt":
+                transform = pipeline.encrypt_file
+            else:
+                transform = pipeline.decrypt_file
             result = transform(self._src, self._dst, self._a, self._b, progress=self._progress)
         except (OSError, ValueError) as error:
             self._emit(("error", describe_error(self._src, error)))
