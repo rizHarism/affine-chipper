@@ -213,6 +213,8 @@ build_exe.bat
 ```
 
 Hasil build ada di `dist\AffineCipher.exe`. Aplikasi tidak menampilkan jendela konsol.
+Skrip ini memasang PyInstaller ke `.venv` bila belum ada, membersihkan `build/` dan
+`dist/` lama, lalu membangun ulang dari awal.
 
 Catatan penting untuk versi `.exe`:
 
