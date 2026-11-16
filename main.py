@@ -6,15 +6,19 @@ Semua pemrosesan file berjalan di thread terpisah agar UI tetap responsif.
 
 from __future__ import annotations
 
+import queue
 import sys
+import threading
 import tkinter as tk
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import metrics
+import pipeline
 from affine_cipher import validate_keys
-from logger import ResultLog
+from logger import ResultLog, build_encrypt_row, now_stamp
+from pipeline import TransformResult
 
 APP_TITLE = "Affine Cipher — Enkripsi & Dekripsi File"
 DEFAULT_A = "7"
@@ -64,6 +68,62 @@ def format_size(size: int) -> str:
             return f"{int(value)} B" if unit == "B" else f"{value:.2f} {unit}"
         value /= 1024
     return f"{size} B"
+
+
+def describe_error(path: Path, error: Exception) -> str:
+    """Pesan kesalahan berbahasa Indonesia untuk masalah file yang umum."""
+    if isinstance(error, PermissionError):
+        return (
+            f"Tidak punya izin mengakses '{path.name}'. "
+            "Tutup file bila sedang dibuka aplikasi lain, lalu coba lagi."
+        )
+    if isinstance(error, FileNotFoundError):
+        return f"File tidak ditemukan: {path}"
+    if isinstance(error, ValueError):
+        return str(error)
+    if isinstance(error, OSError):
+        detail = error.strerror or str(error)
+        return f"Operasi file gagal pada '{path.name}': {detail}"
+    return f"Terjadi kesalahan tak terduga: {error}"
+
+
+class TransformWorker(threading.Thread):
+    """Menjalankan enkripsi/dekripsi di thread terpisah dan melapor lewat queue."""
+
+    def __init__(
+        self,
+        emit: Callable[[tuple[str, object]], None],
+        operation: str,
+        src: Path,
+        dst: Path,
+        a: int,
+        b: int,
+    ) -> None:
+        super().__init__(daemon=True, name=f"transform-{operation}")
+        self._emit = emit
+        self._operation = operation
+        self._src = src
+        self._dst = dst
+        self._a = a
+        self._b = b
+        self._last_percent = -1
+
+    def _progress(self, fraction: float) -> None:
+        percent = int(fraction * 100)
+        if percent != self._last_percent:
+            self._last_percent = percent
+            self._emit(("progress", fraction))
+
+    def run(self) -> None:
+        try:
+            transform = pipeline.encrypt_file if self._operation == "encrypt" else pipeline.decrypt_file
+            result = transform(self._src, self._dst, self._a, self._b, progress=self._progress)
+        except (OSError, ValueError) as error:
+            self._emit(("error", describe_error(self._src, error)))
+        except Exception as error:  # jaring pengaman agar UI tidak menunggu selamanya
+            self._emit(("error", f"Terjadi kesalahan tak terduga: {error}"))
+        else:
+            self._emit(("done", result))
 
 
 class FilePanel(ttk.LabelFrame):
@@ -248,6 +308,10 @@ class AffineApp(tk.Tk):
         self.log.save()
         metrics.prime_cpu_percent()
 
+        self.events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._worker: TransformWorker | None = None
+        self._job: dict[str, object] | None = None
+
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
 
@@ -261,6 +325,7 @@ class AffineApp(tk.Tk):
             fill="x", padx=12, pady=6
         )
         self._update_status()
+        self.after(100, self._drain_queue)
 
     # ------------------------------------------------------------------ tab --
 
@@ -425,12 +490,172 @@ class AffineApp(tk.Tk):
             parent=self,
         )
 
+    def _set_busy(self, busy: bool) -> None:
+        """Menonaktifkan tombol aksi selama pemrosesan berjalan."""
+        state = "disabled" if busy else "normal"
+        for button in (self.encrypt_button, self.decrypt_button, self.verify_button):
+            button.configure(state=state)
+
+    def _drain_queue(self) -> None:
+        """Mengambil event dari worker thread dan memperbarui UI."""
+        while True:
+            try:
+                kind, payload = self.events.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_event(kind, payload)
+        self.after(100, self._drain_queue)
+
+    def _handle_event(self, kind: str, payload: object) -> None:
+        job = self._job
+        if job is None:
+            return
+        if kind == "progress":
+            self._handle_progress(float(payload))  # type: ignore[arg-type]
+            return
+        if kind == "error":
+            operation = str(job["operation"])
+            self._worker = None
+            self._job = None
+            self._set_busy(False)
+            self._set_status(str(payload), operation)
+            messagebox.showerror("Operasi gagal", str(payload), parent=self)
+            return
+        # kind == "done"
+        self._worker = None
+        self._job = None
+        self._set_busy(False)
+        result = payload
+        assert isinstance(result, TransformResult)
+        if job["operation"] == "encrypt":
+            self._finish_encrypt(result, job)
+        else:
+            self._finish_decrypt(result, job)
+
+    def _handle_progress(self, fraction: float) -> None:
+        job = self._job
+        if job is None:
+            return
+        encrypting = job["operation"] == "encrypt"
+        widget = self.encrypt_progress if encrypting else self.decrypt_progress
+        widget["value"] = fraction * 100
+        name = Path(str(job["src"])).name
+        if fraction >= 1.0:
+            if encrypting:
+                self._set_status("Transformasi selesai, menghitung avalanche…")
+            else:
+                self._set_status("Transformasi selesai, menyiapkan hasil…")
+        else:
+            self._set_status(f"Memproses {name}… {fraction * 100:.0f}%")
+
+    def _set_status(self, text: str, operation: str | None = None) -> None:
+        if operation is None:
+            job = self._job
+            operation = str(job["operation"]) if job is not None else "encrypt"
+        variable = self.encrypt_status if operation == "encrypt" else self.decrypt_status
+        variable.set(text)
+
+    def _begin_transform(
+        self,
+        operation: str,
+        src: Path,
+        dst: Path,
+        a: int,
+        b: int,
+        note: str,
+    ) -> None:
+        """Menyiapkan UI lalu menjalankan worker transformasi."""
+        if not src.exists():
+            messagebox.showerror(
+                "File tidak ditemukan", f"File tidak ditemukan: {src}", parent=self
+            )
+            return
+        if dst == src:
+            messagebox.showerror(
+                "Output bentrok",
+                "File hasil akan menimpa file masukan. Pilih file lain.",
+                parent=self,
+            )
+            return
+
+        self._job = {
+            "operation": operation,
+            "src": src,
+            "dst": dst,
+            "a": a,
+            "b": b,
+            "note": note,
+        }
+        encrypting = operation == "encrypt"
+        progress = self.encrypt_progress if encrypting else self.decrypt_progress
+        progress["value"] = 0
+        cards = self.encrypt_cards if encrypting else self.decrypt_cards
+        cards.clear()
+        self._set_status(f"Memproses {src.name}…")
+        self._set_busy(True)
+
+        self._worker = TransformWorker(self.events.put, operation, src, dst, a, b)
+        self._worker.start()
+
     # ------------------------------------------------------------- handlers --
 
     def _on_encrypt(self) -> None:
-        self._not_ready("enkripsi")
+        if self._worker is not None:
+            return
+        src = self.encrypt_file.path
+        if src is None:
+            messagebox.showinfo(
+                "Belum ada file",
+                "Pilih file yang akan dienkripsi terlebih dahulu.",
+                parent=self,
+            )
+            return
+        keys = self.encrypt_keys.read()
+        if keys is None:
+            return
+        a, b = keys
+        self._begin_transform(
+            "encrypt",
+            src,
+            pipeline.output_names(src, "enc"),
+            a,
+            b,
+            self.encrypt_note.value(),
+        )
+
+    def _finish_encrypt(self, result: TransformResult, job: Mapping[str, object]) -> None:
+        row = build_encrypt_row(
+            result,
+            int(job["a"]),  # type: ignore[arg-type]
+            int(job["b"]),  # type: ignore[arg-type]
+            now_stamp(),
+            str(job["note"]),
+        )
+        self.encrypt_progress["value"] = 100
+        self.encrypt_cards.show(
+            {
+                "waktu": row["Waktu_Enkripsi_Detik"],
+                "throughput": row["Throughput_Enkripsi_MBps"],
+                "entropi_plain": row["Entropi_Plainteks"],
+                "entropi_cipher": row["Entropi_Cipherteks"],
+                "avalanche_plain": row["Avalanche_Plainteks_Persen"],
+                "avalanche_key": row["Avalanche_Kunci_Persen"],
+                "cpu": row["CPU_Usage_Enkripsi_Persen"],
+                "ram": row["RAM_Usage_Enkripsi_MB"],
+                "ukuran_asli": row["Ukuran_Asli_Byte"],
+                "ukuran_hasil": row["Ukuran_Hasil_Byte"],
+                "output": str(result.output_path),
+                "hash": row["Hash_SHA256_Asli"],
+            }
+        )
+        self.log.add_trial(row)
+        self.encrypt_status.set(f"Enkripsi selesai: {result.output_path.name}")
+        self._warn_if_log_failed()
 
     def _on_decrypt(self) -> None:
+        self._not_ready("dekripsi")
+
+    def _finish_decrypt(self, result: TransformResult, job: Mapping[str, object]) -> None:
         self._not_ready("dekripsi")
 
     def _on_verify(self) -> None:
