@@ -79,18 +79,23 @@ def format_size(size: int) -> str:
 
 def describe_error(path: Path, error: Exception) -> str:
     """Pesan kesalahan berbahasa Indonesia untuk masalah file yang umum."""
+    filename = getattr(error, "filename", None)
+    target = Path(filename) if filename else path
     if isinstance(error, PermissionError):
         return (
-            f"Tidak punya izin mengakses '{path.name}'. "
-            "Tutup file bila sedang dibuka aplikasi lain, lalu coba lagi."
+            f"Tidak punya izin mengakses '{target.name}'. "
+            "Tutup file bila sedang dibuka aplikasi lain, atau periksa izin folder tujuan, "
+            "lalu coba lagi."
         )
     if isinstance(error, FileNotFoundError):
         return f"File tidak ditemukan: {path}"
     if isinstance(error, ValueError):
         return str(error)
     if isinstance(error, OSError):
+        if error.errno == 28:  # ENOSPC
+            return "Ruang disk penuh. Kosongkan sebagian disk lalu coba lagi."
         detail = error.strerror or str(error)
-        return f"Operasi file gagal pada '{path.name}': {detail}"
+        return f"Operasi file gagal pada '{target.name}': {detail}"
     return f"Terjadi kesalahan tak terduga: {error}"
 
 
@@ -164,7 +169,7 @@ class VerifyWorker(threading.Thread):
             "first_difference_offset": None,
             "plain_hash": expected,
             "decrypted_hash": actual,
-            "method_note": "verifikasi hash manual",
+            "method_note": "banding hash manual",
         }
 
     def run(self) -> None:
@@ -175,6 +180,14 @@ class VerifyWorker(threading.Thread):
             else:
                 assert self._second is not None
                 comparison = metrics.compare_files(self._first, self._second)
+                if comparison.differing_bytes == 0:
+                    detail = "banding dua file; byte berbeda: 0"
+                else:
+                    detail = (
+                        "banding dua file; byte berbeda: "
+                        f"{comparison.differing_bytes}, offset pertama: "
+                        f"{comparison.first_difference_offset}"
+                    )
                 payload = {
                     "mode": "files",
                     "status": "COCOK" if comparison.hash_match else "TIDAK_COCOK",
@@ -184,7 +197,7 @@ class VerifyWorker(threading.Thread):
                     "first_difference_offset": comparison.first_difference_offset,
                     "plain_hash": comparison.hash_a,
                     "decrypted_hash": comparison.hash_b,
-                    "method_note": "verifikasi dua file",
+                    "method_note": detail,
                 }
         except (OSError, ValueError) as error:
             self._emit(("error", describe_error(self._first, error)))
@@ -371,9 +384,17 @@ class AffineApp(tk.Tk):
         self.minsize(900, 680)
 
         self.output_dir = app_dir() / "output"
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            self.output_dir = Path.home() / "AffineCipher"
+            try:
+                self.output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
         self.log = ResultLog(self.output_dir / "hasil_pengujian.csv")
-        self.log.save()
+        if not self.log.path.exists():
+            self.log.save()
         metrics.prime_cpu_percent()
 
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -393,6 +414,13 @@ class AffineApp(tk.Tk):
             fill="x", padx=12, pady=6
         )
         self._update_status()
+        if self.log.notice:
+            self.after(
+                200,
+                lambda: messagebox.showwarning(
+                    "Perhatian pada file CSV", self.log.notice, parent=self
+                ),
+            )
         self.after(100, self._drain_queue)
 
     # ------------------------------------------------------------------ tab --
@@ -537,6 +565,8 @@ class AffineApp(tk.Tk):
 
     def _update_status(self) -> None:
         parts = [f"CSV: {self.log.path}", f"{len(self.log.rows)} baris"]
+        if self.log.notice:
+            parts.append(f"CATATAN: {self.log.notice}")
         if self.log.last_error:
             parts.append(f"PERINGATAN: {self.log.last_error}")
         self._status_var.set(" | ".join(parts))
@@ -559,13 +589,26 @@ class AffineApp(tk.Tk):
 
     def _drain_queue(self) -> None:
         """Mengambil event dari worker thread dan memperbarui UI."""
-        while True:
-            try:
-                kind, payload = self.events.get_nowait()
-            except queue.Empty:
-                break
-            self._handle_event(kind, payload)
-        self.after(100, self._drain_queue)
+        try:
+            while True:
+                try:
+                    kind, payload = self.events.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle_event(kind, payload)
+                except Exception as error:  # kesalahan UI tidak boleh mematikan polling
+                    self._worker = None
+                    self._job = None
+                    self._set_busy(False)
+                    self._update_status()
+                    messagebox.showerror(
+                        "Kesalahan tak terduga",
+                        f"Terjadi kesalahan saat memperbarui tampilan: {error}",
+                        parent=self,
+                    )
+        finally:
+            self.after(100, self._drain_queue)
 
     def _handle_event(self, kind: str, payload: object) -> None:
         job = self._job
@@ -761,7 +804,8 @@ class AffineApp(tk.Tk):
                 "dicatat sebagai baris Dekripsi baru. Hasil belum diverifikasi."
             )
         else:
-            data = build_decrypt_update(result, a, b, note)
+            previous_note = self.log.rows[row_index]["Catatan_Pengujian"]
+            data = build_decrypt_update(result, a, b, note, previous_note)
             self.log.update(row_index, data)
             message = (
                 f"Dekripsi selesai — kolom dekripsi baris {row_index + 1} terisi. "
@@ -848,9 +892,7 @@ class AffineApp(tk.Tk):
     def _finish_verify(self, data: Mapping[str, object]) -> None:
         status = str(data["status"])
         self._set_verify_text(self._verify_report(data))
-        row_index = self.log.find_for_verification(
-            str(data["plain_hash"]), str(data["decrypted_hash"])
-        )
+        row_index = self.log.find_for_verification(str(data["decrypted_hash"]))
         if row_index is None:
             self.verify_status.set(
                 "Pemeriksaan selesai, tetapi hasilnya tidak dapat dipasangkan ke percobaan mana pun."

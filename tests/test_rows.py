@@ -83,6 +83,14 @@ class TestDecryptRows(unittest.TestCase):
         update = build_decrypt_update(make_result(), 7, 13, "kunci benar")
         self.assertEqual(update["Catatan_Pengujian"], "kunci benar")
 
+    def test_decrypt_update_merges_previous_note(self):
+        update = build_decrypt_update(make_result(), 7, 13, "kunci benar", "run 1/3")
+        self.assertEqual(update["Catatan_Pengujian"], "run 1/3; kunci benar")
+
+    def test_decrypt_update_does_not_duplicate_note(self):
+        update = build_decrypt_update(make_result(), 7, 13, "run 1/3", "run 1/3")
+        self.assertEqual(update["Catatan_Pengujian"], "run 1/3")
+
     def test_standalone_row(self):
         row = build_standalone_decrypt_row(
             make_result(avalanche_plain=None, avalanche_key=None),

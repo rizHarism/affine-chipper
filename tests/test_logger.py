@@ -140,7 +140,7 @@ class TestRowMatching(unittest.TestCase):
                 log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "h", "Kunci_a": "7", "Kunci_b": "13"})
                 log.update(len(log.rows) - 1, {"Hash_SHA256_Dekripsi": "h", "Operasi": "Enkripsi+Dekripsi"})
             log.update(0, {"Status_Hash_Cocok": "COCOK", "Operasi": "Enkripsi+Dekripsi+Verifikasi"})
-            self.assertEqual(log.find_for_verification("h", "h"), 1)
+            self.assertEqual(log.find_for_verification("h"), 1)
 
     def test_verification_wrong_key_row(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,13 +153,55 @@ class TestRowMatching(unittest.TestCase):
                     "Operasi": "Dekripsi",
                 }
             )
-            self.assertEqual(log.find_for_verification("h-asli", "sampah"), 0)
+            self.assertEqual(log.find_for_verification("sampah"), 0)
+
+    def test_verification_ignores_unrelated_plain_hash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = ResultLog(Path(tmp) / "h.csv")
+            log.add_trial(
+                {
+                    "Nama_File": "a.pdf",
+                    "Hash_SHA256_Asli": "h-asli",
+                    "Hash_SHA256_Dekripsi": "h-benar",
+                    "Operasi": "Enkripsi+Dekripsi",
+                }
+            )
+            self.assertIsNone(log.find_for_verification("h-salah"))
 
     def test_verification_unmatched(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = ResultLog(Path(tmp) / "h.csv")
             log.add_trial({"Nama_File": "a.pdf", "Hash_SHA256_Asli": "h"})
-            self.assertIsNone(log.find_for_verification("lain", "lain2"))
+            self.assertIsNone(log.find_for_verification("lain2"))
+
+
+class TestDamagedCsv(unittest.TestCase):
+    def test_non_utf8_csv_is_backed_up_and_not_lost(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hasil.csv"
+            path.write_bytes(b"Timestamp,Nama_File\n2026-11-16 10:00:00,caf\xe9.pdf\n")
+            log = ResultLog(path)
+            self.assertEqual(log.rows, [])
+            self.assertIn("tidak dapat dibaca", log.notice or "")
+            backups = list(path.parent.glob("hasil.csv.rusak-*"))
+            self.assertEqual(len(backups), 1)
+            self.assertIn(b"caf\xe9.pdf", backups[0].read_bytes())
+
+    def test_foreign_header_is_backed_up(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hasil.csv"
+            path.write_text("A,B\n1,2\n", encoding="utf-8")
+            log = ResultLog(path)
+            self.assertEqual(log.rows, [])
+            self.assertEqual(len(list(path.parent.glob("hasil.csv.rusak-*"))), 1)
+
+    def test_valid_csv_without_write_is_loaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hasil.csv"
+            log = ResultLog(path)
+            log.add_trial({"Nama_File": "a.txt"})
+            self.assertIsNone(log.last_error)
+            self.assertEqual(len(ResultLog(path).rows), 1)
 
 
 if __name__ == "__main__":

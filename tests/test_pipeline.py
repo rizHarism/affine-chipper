@@ -66,6 +66,15 @@ class TestPipeline(unittest.TestCase):
             encrypt_file(src, Path(tmp) / "p.bin.enc", 7, 13, progress=seen.append)
             self.assertEqual(seen[-1], 1.0)
 
+    def test_no_part_file_left_behind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "a.txt"
+            src.write_bytes(b"data" * 100)
+            dst = Path(tmp) / "a.txt.enc"
+            encrypt_file(src, dst, 7, 13)
+            self.assertTrue(dst.exists())
+            self.assertFalse(dst.with_name(dst.name + ".part").exists())
+
     def test_empty_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "kosong.txt"

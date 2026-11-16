@@ -2,9 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from affine_cipher import encrypt_bytes
 from metrics import (
     avalanche_percent,
     bit_difference,
+    calculate_avalanche_key,
+    calculate_avalanche_plaintext,
     calculate_entropy,
     compare_files,
     compute_sha256,
@@ -42,6 +45,30 @@ class TestBits(unittest.TestCase):
     def test_avalanche_percent(self):
         self.assertAlmostEqual(avalanche_percent(1, 800), 0.125, places=6)
         self.assertIsNone(avalanche_percent(0, 0))
+
+    def test_avalanche_plaintext_reference(self):
+        data = b"A" * 1000
+        diff = bit_difference(
+            encrypt_bytes(b"A", 7, 13), encrypt_bytes(bytes([0x41 ^ 0x01]), 7, 13)
+        )
+        expected = diff / (len(data) * 8) * 100
+        self.assertAlmostEqual(calculate_avalanche_plaintext(data, 7, 13), expected, places=6)
+        self.assertAlmostEqual(calculate_avalanche_plaintext(data, 7, 13), 0.0375, places=6)
+
+    def test_avalanche_key_reference(self):
+        data = bytes(range(256))
+        diff = bit_difference(
+            encrypt_bytes(data, 7, 13), encrypt_bytes(data, 7, 12)
+        )
+        self.assertAlmostEqual(
+            calculate_avalanche_key(data, 7, 13),
+            diff / (len(data) * 8) * 100,
+            places=6,
+        )
+
+    def test_avalanche_empty_returns_none(self):
+        self.assertIsNone(calculate_avalanche_plaintext(b"", 7, 13))
+        self.assertIsNone(calculate_avalanche_key(b"", 7, 13))
 
 
 class TestHashAndCompare(unittest.TestCase):

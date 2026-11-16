@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -87,28 +88,41 @@ def _run(
     seconds = 0.0
 
     dst.parent.mkdir(parents=True, exist_ok=True)
+    # Tulis ke file sementara agar kegagalan di tengah jalan tidak meninggalkan
+    # file hasil setengah jadi yang namanya terlihat sah.
+    temporary = dst.with_name(dst.name + ".part")
     cpu_percent()  # memulai interval CPU; nilainya tidak dipakai
 
-    with open(src, "rb") as handle_in, open(dst, "wb") as handle_out:
-        while True:
-            chunk = handle_in.read(CHUNK_SIZE)
-            if not chunk:
-                break
-            started = time.perf_counter()
-            transformed = apply_table(chunk, table)
-            seconds += time.perf_counter() - started
+    try:
+        with open(src, "rb") as handle_in, open(temporary, "wb") as handle_out:
+            while True:
+                chunk = handle_in.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                started = time.perf_counter()
+                transformed = apply_table(chunk, table)
+                seconds += time.perf_counter() - started
 
-            hash_in.update(chunk)
-            hash_out.update(transformed)
-            for value, count in _count_values(chunk).items():
-                counts_in[value] += count
-            for value, count in _count_values(transformed).items():
-                counts_out[value] += count
+                hash_in.update(chunk)
+                hash_out.update(transformed)
+                # Satu pass Counter saja: frekuensi keluaran diturunkan lewat tabel
+                # karena substitusi bersifat satu-ke-satu.
+                for value, count in _count_values(chunk).items():
+                    counts_in[value] += count
+                    counts_out[table[value]] += count
 
-            handle_out.write(transformed)
-            processed += len(chunk)
-            if progress is not None and source_size:
-                progress(processed / source_size)
+                handle_out.write(transformed)
+                processed += len(chunk)
+                if progress is not None and source_size:
+                    progress(processed / source_size)
+        os.replace(temporary, dst)
+    except BaseException:
+        try:
+            if temporary.exists():
+                temporary.unlink()
+        except OSError:
+            pass
+        raise
 
     if progress is not None:
         progress(1.0)

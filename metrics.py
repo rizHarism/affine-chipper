@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import math
+import operator
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 import psutil
+
+from affine_cipher import encrypt_bytes
 
 CHUNK_SIZE = 4 * 1024 * 1024
 _PROCESS = psutil.Process()
@@ -81,6 +84,33 @@ def avalanche_percent(diff_bits: int, total_bits: int) -> float | None:
     return diff_bits / total_bits * 100
 
 
+def calculate_avalanche_plaintext(original_data: bytes, a: int, b: int) -> float | None:
+    """Avalanche plainteks di memori: byte pertama di-XOR ``0x01`` lalu dienkripsi ulang.
+
+    Versi referensi; aplikasi memakai ``pipeline.measure_avalanche`` yang streaming.
+    """
+    if not original_data:
+        return None
+    flipped = bytes((original_data[0] ^ 0x01,)) + original_data[1:]
+    difference = bit_difference(
+        encrypt_bytes(original_data, a, b), encrypt_bytes(flipped, a, b)
+    )
+    return avalanche_percent(difference, len(original_data) * 8)
+
+
+def calculate_avalanche_key(original_data: bytes, a: int, b: int) -> float | None:
+    """Avalanche kunci di memori: ``b`` diubah tepat satu bit (``b ^ 0x01``).
+
+    Versi referensi; aplikasi memakai ``pipeline.measure_avalanche`` yang streaming.
+    """
+    if not original_data:
+        return None
+    difference = bit_difference(
+        encrypt_bytes(original_data, a, b), encrypt_bytes(original_data, a, b ^ 0x01)
+    )
+    return avalanche_percent(difference, len(original_data) * 8)
+
+
 def throughput_mbps(size_bytes: int, seconds: float) -> float | None:
     """Throughput dalam MB/s (1 MB = 1024 x 1024 byte); ``None`` bila tak terdefinisi."""
     if size_bytes <= 0 or seconds <= 0:
@@ -143,15 +173,17 @@ def compare_files(
             accumulator_b.update(chunk_b)
             if chunk_a != chunk_b:
                 shared = min(len(chunk_a), len(chunk_b))
-                for index in range(shared):
-                    if chunk_a[index] != chunk_b[index]:
-                        differing += 1
-                        if first_offset is None:
-                            first_offset = offset + index
+                shared_a = chunk_a[:shared]
+                shared_b = chunk_b[:shared]
+                differing += sum(map(operator.ne, shared_a, shared_b))
+                if first_offset is None:
+                    index = next(
+                        (i for i, (x, y) in enumerate(zip(shared_a, shared_b)) if x != y),
+                        None,
+                    )
+                    first_offset = offset + (index if index is not None else shared)
                 if len(chunk_a) != len(chunk_b):
                     differing += abs(len(chunk_a) - len(chunk_b))
-                    if first_offset is None:
-                        first_offset = offset + shared
             offset += max(len(chunk_a), len(chunk_b))
 
     hash_a = accumulator_a.hexdigest()

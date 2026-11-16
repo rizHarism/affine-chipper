@@ -68,22 +68,45 @@ class ResultLog:
         self.path = Path(path)
         self.rows: list[dict[str, str]] = []
         self.last_error: str | None = None
+        self.notice: str | None = None
         self._load()
+
+    def _backup_unreadable(self) -> Path:
+        """Memindahkan CSV yang tidak bisa dibaca agar tidak tertimpa data baru."""
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = self.path.with_name(f"{self.path.name}.rusak-{stamp}")
+        try:
+            os.replace(self.path, backup)
+        except OSError:
+            return self.path
+        return backup
 
     def _load(self) -> None:
         if not self.path.exists():
             return
-        with self.path.open("r", encoding="utf-8-sig", newline="") as handle:
-            for raw in csv.DictReader(handle):
-                self.rows.append(
-                    {column: (raw.get(column) or "-") for column in CSV_HEADER}
-                )
+        try:
+            with self.path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                fieldnames = reader.fieldnames or []
+                if tuple(fieldnames) != CSV_HEADER:
+                    raise ValueError("header CSV tidak sesuai")
+                for raw in reader:
+                    self.rows.append(
+                        {column: (raw.get(column) or "-") for column in CSV_HEADER}
+                    )
+        except (UnicodeDecodeError, ValueError):
+            self.rows.clear()
+            backup = self._backup_unreadable()
+            self.notice = (
+                f"File CSV lama tidak dapat dibaca dan telah dipindahkan ke '{backup.name}'. "
+                "Pengujian baru akan memakai file CSV yang bersih."
+            )
 
     def save(self) -> None:
         self.last_error = None
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(self.path.name + ".tmp")
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             with temporary.open("w", encoding="utf-8-sig", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=CSV_HEADER)
                 writer.writeheader()
@@ -129,24 +152,20 @@ class ResultLog:
                 return index
         return None
 
-    def find_for_verification(
-        self,
-        plain_hash: str | None,
-        decrypted_hash: str | None,
-    ) -> int | None:
-        """Baris percobaan yang cocok untuk menerima status verifikasi."""
-        if decrypted_hash:
-            for index, row in enumerate(self.rows):
-                if row["Hash_SHA256_Dekripsi"] == decrypted_hash and row["Status_Hash_Cocok"] == "-":
-                    return index
-        if plain_hash:
-            for index, row in enumerate(self.rows):
-                if (
-                    row["Hash_SHA256_Asli"] == plain_hash
-                    and row["Hash_SHA256_Dekripsi"] != "-"
-                    and row["Status_Hash_Cocok"] == "-"
-                ):
-                    return index
+    def find_for_verification(self, decrypted_hash: str) -> int | None:
+        """Baris percobaan yang cocok menerima status verifikasi.
+
+        Hanya baris yang kolom ``Hash_SHA256_Dekripsi``-nya sama dengan file yang
+        diperiksa yang boleh menerima status. Pencocokan berbasis hash asli sengaja
+        tidak dipakai: file yang hash-nya tidak tercatat sebagai hasil dekripsi mana
+        pun tidak boleh menodai baris percobaan lain.
+        """
+        for index, row in enumerate(self.rows):
+            if (
+                row["Hash_SHA256_Dekripsi"] == decrypted_hash
+                and row["Status_Hash_Cocok"] == "-"
+            ):
+                return index
         return None
 
 
@@ -154,6 +173,17 @@ def _size_addition_percent(plain_size: int, cipher_size: int) -> str:
     if not plain_size:
         return "-"
     return f"{(cipher_size - plain_size) / plain_size * 100:.2f}"
+
+
+def _merge_note(previous: str, addition: str) -> str:
+    """Menggabungkan catatan lama dan baru dengan ``"; "`` tanpa mengulang isi sama."""
+    previous = (previous or "").strip()
+    addition = (addition or "").strip()
+    if previous in ("", "-"):
+        return addition or "-"
+    if not addition or addition == previous or addition in previous.split("; "):
+        return previous
+    return f"{previous}; {addition}"
 
 
 def build_encrypt_row(
@@ -196,6 +226,7 @@ def build_decrypt_update(
     a: int,
     b: int,
     note: str,
+    previous_note: str = "-",
 ) -> dict[str, str]:
     """Kolom yang diperbarui pada baris percobaan saat dekripsi berhasil dipasangkan."""
     update = {
@@ -207,7 +238,7 @@ def build_decrypt_update(
         "Hash_SHA256_Dekripsi": result.hash_plain,
     }
     if note:
-        update["Catatan_Pengujian"] = note
+        update["Catatan_Pengujian"] = _merge_note(previous_note, note)
     return update
 
 
@@ -260,13 +291,8 @@ def build_verify_update(
         stage = current_stage
 
     previous_note = row.get("Catatan_Pengujian", "-")
-    if previous_note in ("", "-"):
-        merged_note = method_note
-    else:
-        merged_note = f"{previous_note}; {method_note}"
-
     return {
         "Operasi": stage,
         "Status_Hash_Cocok": status,
-        "Catatan_Pengujian": merged_note,
+        "Catatan_Pengujian": _merge_note(previous_note, method_note),
     }
