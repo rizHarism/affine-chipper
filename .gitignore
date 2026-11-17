@@ -8,6 +8,6 @@ build/
 dist/
 *.spec
 
-# Dokumen internal (spesifikasi & rencana), sengaja tidak dipublikasikan
+# Dokumen internal
 AGENTS.md
 docs/
