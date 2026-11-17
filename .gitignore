@@ -7,3 +7,7 @@ output/
 build/
 dist/
 *.spec
+
+# Dokumen internal (spesifikasi & rencana), sengaja tidak dipublikasikan
+AGENTS.md
+docs/
