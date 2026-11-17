@@ -91,23 +91,49 @@ dikerjakan beserta persentase keseluruhan:
 
 | Tahap | Enkripsi | Dekripsi | Isi |
 |---|---|---|---|
-| `Membaca & mentransformasi potongan file` | 0–75% | 0–100% | Baca 4 MB → substitusi tabel → SHA-256 → hitung frekuensi byte → tulis hasil |
+| `Memproses file (baca, transformasi, hash, entropi)` | 0–75% | 0–100% | Baca 4 MB → substitusi tabel → SHA-256 → hitung frekuensi byte → tulis hasil |
 | `Menghitung avalanche plainteks & kunci` | 75–100% | — | Baca file sekali lagi, enkripsi ulang dengan plainteks dimodifikasi dan dengan kunci `b ^ 0x01`, lalu hitung Hamming distance |
 | `Selesai` | 100% | 100% | Menyiapkan kartu hasil dan mencatat CSV |
 
-### Arti "waktu" dan "throughput" di kartu hasil
+### Arti "waktu" dan "throughput"
 
-`Waktu_Enkripsi_Detik` dan `Waktu_Dekripsi_Detik` **bukan** waktu tunggu total. Yang
-diukur hanya pass substitusi byte (`apply_table` per potongan 4 MB, dijumlahkan).
-Baca/tulis disk, SHA-256, penghitungan entropi, dan pass avalanche **tidak** dihitung.
-Throughput diturunkan dari waktu tersebut, jadi nilainya adalah kecepatan algoritma
-murni, bukan kecepatan aplikasi secara keseluruhan.
+`Waktu_Enkripsi_Detik` dan `Waktu_Dekripsi_Detik` adalah **waktu seluruh operasi**
+selain avalanche: buka file, baca per potongan 4 MB, substitusi tabel, SHA-256,
+penghitungan entropi, tulis hasil, sampai file hasil di-rename. Pass avalanche
+berjalan setelah timer berhenti, jadi tidak ikut dihitung karena pass itu hanya
+dibuat untuk pengukuran.
 
-Akibatnya, pada file besar angka waktu terlihat sangat kecil. Contoh pengukuran 400 MB:
-substitusi murni ±0,37 detik (±1000 MB/s), sedangkan total yang dirasakan pengguna
-±35 detik karena penghitungan entropi (`collections.Counter` di Python) dan pass
-avalanche jauh lebih mahal daripada cipher-nya. Ini sifat pengukuran yang disengaja,
-bukan bug; tulis di laporan bahwa yang dibandingkan adalah waktu algoritma.
+`Throughput_*` memakai pembagi yang sama: (ukuran byte / 1.048.576) / waktu operasi.
+Jadi throughput menggambarkan kecepatan aplikasi, bukan kecepatan cipher murni.
+
+Contoh terukur pada file 400 MB: waktu operasi ±15,9 detik → throughput ±25,1 MB/s.
+Dari jumlah itu, substitusi byte sendiri hanya ±0,37 detik; sisanya didominasi
+penghitungan entropi (`collections.Counter` di Python) dan SHA-256. Total yang
+dirasakan pengguna ±20 detik karena pass avalanche berjalan setelahnya.
+Sebutkan pembagian ini di laporan agar tidak menyimpulkan algoritma Affine lambat.
+
+Karena I/O ikut dihitung, tiga pengulangan pada file yang sama bisa sedikit berbeda
+(tergantung cache disk dan beban CPU) — itulah alasan pengujian dilakukan 3 kali lalu
+dirata-rata.
+
+### Satuan pada kartu hasil
+
+Satuan ditulis di belakang nilai, sedangkan CSV tetap berisi angka mentah:
+
+| Kartu | Contoh tampilan |
+|---|---|
+| Waktu enkripsi | `15.909304 detik` |
+| Throughput | `25.14 MB/s` |
+| Entropi plainteks/cipherteks | `7.8241 bit/byte` |
+| Avalanche plainteks/kunci | `0.0000 %` / `24.9023 %` |
+| CPU | `20.40 %` |
+| RAM | `37.00 MB` |
+| Ukuran asli/hasil | `419430400 byte (400.00 MB)` |
+| Hash SHA-256 | 64 karakter hex, tanpa satuan |
+
+Ukuran ditampilkan sebagai byte (persis seperti CSV) sekaligus padanannya dalam KB
+(bila < 1 MB) atau MB, supaya mudah dibaca tanpa kehilangan bukti bahwa ukuran
+cipherteks sama persis dengan plainteks.
 
 ## Urutan pengujian yang disarankan
 
@@ -150,17 +176,17 @@ Aturan:
 | `Kunci_a` | Nilai `a` yang dipakai (ganjil). |
 | `Kunci_b` | Nilai `b` yang dipakai. |
 | `Operasi` | Tahap terakhir percobaan (lihat tabel di bawah). |
-| `Waktu_Enkripsi_Detik` | Waktu pass transformasi enkripsi (I/O dan hash tidak dihitung). |
-| `Waktu_Dekripsi_Detik` | Waktu pass transformasi dekripsi. |
-| `Throughput_Enkripsi_MBps` | Kecepatan enkripsi (MB/s, 1 MB = 1024×1024 byte). |
-| `Throughput_Dekripsi_MBps` | Kecepatan dekripsi. |
+| `Waktu_Enkripsi_Detik` | Waktu enkripsi: baca + transformasi + SHA-256 + entropi + tulis (avalanche tidak dihitung). |
+| `Waktu_Dekripsi_Detik` | Waktu dekripsi dengan cakupan yang sama. |
+| `Throughput_Enkripsi_MBps` | (ukuran byte / 1.048.576) dibagi `Waktu_Enkripsi_Detik`. |
+| `Throughput_Dekripsi_MBps` | (ukuran byte / 1.048.576) dibagi `Waktu_Dekripsi_Detik`. |
 | `Entropi_Plainteks` | Entropi Shannon plainteks (0–8 bit/byte). |
 | `Entropi_Cipherteks` | Entropi Shannon cipherteks. |
 | `Avalanche_Plainteks_Persen` | Persentase bit cipherteks yang berubah saat 1 bit plainteks dibalik. |
 | `Avalanche_Kunci_Persen` | Persentase bit cipherteks yang berubah saat 1 bit kunci `b` dibalik. |
-| `CPU_Usage_Enkripsi_Persen` | Pemakaian CPU (system-wide) selama pass enkripsi. |
+| `CPU_Usage_Enkripsi_Persen` | Pemakaian CPU (system-wide) selama operasi enkripsi. |
 | `RAM_Usage_Enkripsi_MB` | RSS proses aplikasi setelah enkripsi (MB). |
-| `CPU_Usage_Dekripsi_Persen` | Pemakaian CPU selama pass dekripsi. |
+| `CPU_Usage_Dekripsi_Persen` | Pemakaian CPU selama operasi dekripsi. |
 | `RAM_Usage_Dekripsi_MB` | RSS proses aplikasi setelah dekripsi (MB). |
 | `Hash_SHA256_Asli` | Hash SHA-256 plainteks. |
 | `Hash_SHA256_Dekripsi` | Hash SHA-256 hasil dekripsi. |

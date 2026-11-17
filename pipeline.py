@@ -24,7 +24,7 @@ CHUNK_SIZE = 4 * 1024 * 1024
 #: Callback progres: ``(nama_tahap, fraksi_progres_keseluruhan)`` dengan fraksi 0.0-1.0.
 ProgressCallback = Callable[[str, float], None]
 
-STAGE_TRANSFORM = "Membaca & mentransformasi potongan file"
+STAGE_TRANSFORM = "Memproses file (baca, transformasi, hash, entropi)"
 STAGE_AVALANCHE = "Menghitung avalanche plainteks & kunci"
 STAGE_DONE = "Selesai"
 
@@ -42,7 +42,7 @@ class TransformResult:
     plain_extension: str
     plain_size: int
     cipher_size: int
-    transform_seconds: float
+    elapsed_seconds: float
     throughput_mbps: float | None
     entropy_plain: float
     entropy_cipher: float
@@ -91,8 +91,12 @@ def _run(
     ``span`` menentukan porsi bilah progres yang dipakai pass ini, sehingga
     tahap berikutnya (mis. avalanche) bisa melanjutkan dari posisi terakhir.
 
+    Waktu yang dikembalikan adalah **waktu operasi**: baca file, substitusi,
+    SHA-256, hitung frekuensi byte, dan tulis hasil. Pass avalanche berjalan di
+    luar fungsi ini sehingga tidak ikut terhitung.
+
     Returns:
-        (processed, output_size, seconds, entropy_input, entropy_output,
+        (processed, output_size, elapsed_seconds, entropy_input, entropy_output,
          hash_input, hash_output, cpu, ram)
     """
     span_start, span_end = span
@@ -102,13 +106,13 @@ def _run(
     counts_in = [0] * 256
     counts_out = [0] * 256
     processed = 0
-    seconds = 0.0
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     # Tulis ke file sementara agar kegagalan di tengah jalan tidak meninggalkan
     # file hasil setengah jadi yang namanya terlihat sah.
     temporary = dst.with_name(dst.name + ".part")
     cpu_percent()  # memulai interval CPU; nilainya tidak dipakai
+    started = time.perf_counter()
 
     try:
         with open(src, "rb") as handle_in, open(temporary, "wb") as handle_out:
@@ -116,9 +120,7 @@ def _run(
                 chunk = handle_in.read(CHUNK_SIZE)
                 if not chunk:
                     break
-                started = time.perf_counter()
                 transformed = apply_table(chunk, table)
-                seconds += time.perf_counter() - started
 
                 hash_in.update(chunk)
                 hash_out.update(transformed)
@@ -141,6 +143,7 @@ def _run(
         except OSError:
             pass
         raise
+    elapsed_seconds = time.perf_counter() - started
 
     if progress is not None:
         progress(STAGE_TRANSFORM, span_end)
@@ -148,7 +151,7 @@ def _run(
     return (
         processed,
         dst.stat().st_size,
-        seconds,
+        elapsed_seconds,
         entropy_from_counts(counts_in),
         entropy_from_counts(counts_out),
         hash_in.hexdigest(),
@@ -167,7 +170,7 @@ def measure_avalanche(
     """Menghitung avalanche plainteks dan kunci dalam persen (streaming).
 
     Pass plainteks: byte pertama di-XOR 0x01. Pass kunci: ``b' = b ^ 0x01``.
-    Kedua pass tidak masuk hitungan ``transform_seconds``. Bila ``progress``
+    Kedua pass tidak masuk hitungan ``elapsed_seconds``. Bila ``progress``
     diberikan, ia menerima fraksi 0.0-1.0 khusus pass ini.
     """
     source_size = src.stat().st_size
@@ -216,7 +219,7 @@ def encrypt_file(
         assert progress is not None
         progress(STAGE_AVALANCHE, TRANSFORM_SHARE + (1.0 - TRANSFORM_SHARE) * fraction)
 
-    plain_size, cipher_size, seconds, entropy_plain, entropy_cipher, hash_plain, hash_cipher, cpu, ram = _run(
+    plain_size, cipher_size, elapsed, entropy_plain, entropy_cipher, hash_plain, hash_cipher, cpu, ram = _run(
         src, dst, table, progress, span=(0.0, TRANSFORM_SHARE)
     )
     avalanche_plain, avalanche_key = measure_avalanche(
@@ -231,8 +234,8 @@ def encrypt_file(
         plain_extension=plain_extension,
         plain_size=plain_size,
         cipher_size=cipher_size,
-        transform_seconds=seconds,
-        throughput_mbps=throughput_mbps(plain_size, seconds),
+        elapsed_seconds=elapsed,
+        throughput_mbps=throughput_mbps(plain_size, elapsed),
         entropy_plain=entropy_plain,
         entropy_cipher=entropy_cipher,
         avalanche_plain=avalanche_plain,
@@ -254,7 +257,7 @@ def decrypt_file(
 ) -> TransformResult:
     """Mendekripsi ``src`` ke ``dst`` per potongan dan mengembalikan metriknya."""
     table = build_decrypt_table(a, b)
-    cipher_size, plain_size, seconds, entropy_cipher, entropy_plain, hash_cipher, hash_plain, cpu, ram = _run(
+    cipher_size, plain_size, elapsed, entropy_cipher, entropy_plain, hash_cipher, hash_plain, cpu, ram = _run(
         src, dst, table, progress
     )
     if progress is not None:
@@ -266,8 +269,8 @@ def decrypt_file(
         plain_extension=plain_extension,
         plain_size=plain_size,
         cipher_size=cipher_size,
-        transform_seconds=seconds,
-        throughput_mbps=throughput_mbps(plain_size, seconds),
+        elapsed_seconds=elapsed,
+        throughput_mbps=throughput_mbps(plain_size, elapsed),
         entropy_plain=entropy_plain,
         entropy_cipher=entropy_cipher,
         avalanche_plain=None,

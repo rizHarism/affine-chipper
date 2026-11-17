@@ -17,7 +17,7 @@ def make_result(**overrides):
         plain_extension="pdf",
         plain_size=1048576,
         cipher_size=1048576,
-        transform_seconds=0.001953125,
+        elapsed_seconds=0.001953125,
         throughput_mbps=512.0,
         entropy_plain=7.5,
         entropy_cipher=7.5,

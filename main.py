@@ -31,34 +31,46 @@ APP_TITLE = "Affine Cipher — Enkripsi & Dekripsi File"
 DEFAULT_A = "7"
 DEFAULT_B = "13"
 TIME_HINT = (
-    "Waktu & throughput yang dicatat hanya menghitung pass transformasi byte "
-    "murni (tanpa baca/tulis disk, hash, entropi, dan avalanche)."
+    "Waktu & throughput mencakup baca file, transformasi, SHA-256, entropi, "
+    "dan tulis hasil; pass avalanche tidak dihitung."
 )
 
+#: Satuan yang ditulis di belakang nilai pada kartu hasil.
+FIELD_UNITS: dict[str, str] = {
+    "waktu": "detik",
+    "throughput": "MB/s",
+    "entropi_plain": "bit/byte",
+    "entropi_cipher": "bit/byte",
+    "avalanche_plain": "%",
+    "avalanche_key": "%",
+    "cpu": "%",
+    "ram": "MB",
+}
+
 ENCRYPT_FIELDS: tuple[tuple[str, str], ...] = (
-    ("waktu", "Waktu enkripsi (detik, algoritma)"),
-    ("throughput", "Throughput (MB/s, algoritma)"),
+    ("waktu", "Waktu enkripsi"),
+    ("throughput", "Throughput"),
     ("entropi_plain", "Entropi plainteks"),
     ("entropi_cipher", "Entropi cipherteks"),
-    ("avalanche_plain", "Avalanche plainteks (%)"),
-    ("avalanche_key", "Avalanche kunci (%)"),
-    ("cpu", "CPU (persen)"),
-    ("ram", "RAM (MB)"),
-    ("ukuran_asli", "Ukuran asli (byte)"),
-    ("ukuran_hasil", "Ukuran hasil (byte)"),
+    ("avalanche_plain", "Avalanche plainteks"),
+    ("avalanche_key", "Avalanche kunci"),
+    ("cpu", "CPU"),
+    ("ram", "RAM"),
+    ("ukuran_asli", "Ukuran asli"),
+    ("ukuran_hasil", "Ukuran hasil"),
     ("output", "File hasil"),
     ("hash", "Hash SHA-256 asli"),
 )
 
 DECRYPT_FIELDS: tuple[tuple[str, str], ...] = (
-    ("waktu", "Waktu dekripsi (detik, algoritma)"),
-    ("throughput", "Throughput (MB/s, algoritma)"),
+    ("waktu", "Waktu dekripsi"),
+    ("throughput", "Throughput"),
     ("entropi_cipher", "Entropi cipherteks"),
     ("entropi_plain", "Entropi plainteks"),
-    ("cpu", "CPU (persen)"),
-    ("ram", "RAM (MB)"),
-    ("ukuran_asli", "Ukuran cipherteks (byte)"),
-    ("ukuran_hasil", "Ukuran hasil (byte)"),
+    ("cpu", "CPU"),
+    ("ram", "RAM"),
+    ("ukuran_asli", "Ukuran cipherteks"),
+    ("ukuran_hasil", "Ukuran hasil"),
     ("output", "File hasil"),
     ("hash", "Hash SHA-256 hasil"),
 )
@@ -79,6 +91,14 @@ def format_size(size: int) -> str:
             return f"{int(value)} B" if unit == "B" else f"{value:.2f} {unit}"
         value /= 1024
     return f"{size} B"
+
+
+def format_size_detail(size: int) -> str:
+    """Ukuran byte beserta padanan terbaca, mis. ``419430400 byte (400.00 MB)``."""
+    detail = format_size(size)
+    if detail.endswith(" B"):
+        return f"{size} byte"
+    return f"{size} byte ({detail})"
 
 
 def describe_error(path: Path, error: Exception) -> str:
@@ -334,11 +354,13 @@ class ResultCards(ttk.LabelFrame):
         title: str,
         fields: Sequence[tuple[str, str]],
         full_width: Sequence[str] = ("output", "hash"),
+        units: Mapping[str, str] | None = None,
     ) -> None:
         super().__init__(master, text=title, padding=10)
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
         self._vars: dict[str, tk.StringVar] = {}
+        self._units = dict(units or {})
 
         row = 0
         column = 0
@@ -368,9 +390,13 @@ class ResultCards(ttk.LabelFrame):
             ).pack(side="left", fill="x", expand=True)
 
     def show(self, values: Mapping[str, str]) -> None:
-        """Mengisi kartu dari mapping; kunci yang tidak diberikan menjadi ``-``."""
+        """Mengisi kartu dari mapping; satuan ditambahkan di belakang nilai."""
         for key, variable in self._vars.items():
-            variable.set(values.get(key, "-"))
+            value = values.get(key, "-")
+            unit = self._units.get(key, "")
+            if value != "-" and unit:
+                value = f"{value} {unit}"
+            variable.set(value)
 
     def clear(self) -> None:
         """Mengosongkan seluruh kartu."""
@@ -458,7 +484,9 @@ class AffineApp(tk.Tk):
             tab, text=TIME_HINT, foreground="#666666", wraplength=880, justify="left"
         ).grid(row=5, column=0, sticky="w", pady=(2, 0))
 
-        self.encrypt_cards = ResultCards(tab, "Hasil Enkripsi", ENCRYPT_FIELDS)
+        self.encrypt_cards = ResultCards(
+            tab, "Hasil Enkripsi", ENCRYPT_FIELDS, units=FIELD_UNITS
+        )
         self.encrypt_cards.grid(row=6, column=0, sticky="ew", pady=(12, 0))
 
     def _build_decrypt_tab(self) -> None:
@@ -492,7 +520,9 @@ class AffineApp(tk.Tk):
             tab, text=TIME_HINT, foreground="#666666", wraplength=880, justify="left"
         ).grid(row=5, column=0, sticky="w", pady=(2, 0))
 
-        self.decrypt_cards = ResultCards(tab, "Hasil Dekripsi", DECRYPT_FIELDS)
+        self.decrypt_cards = ResultCards(
+            tab, "Hasil Dekripsi", DECRYPT_FIELDS, units=FIELD_UNITS
+        )
         self.decrypt_cards.grid(row=6, column=0, sticky="ew", pady=(12, 0))
 
     def _build_verify_tab(self) -> None:
@@ -763,8 +793,8 @@ class AffineApp(tk.Tk):
                 "avalanche_key": row["Avalanche_Kunci_Persen"],
                 "cpu": row["CPU_Usage_Enkripsi_Persen"],
                 "ram": row["RAM_Usage_Enkripsi_MB"],
-                "ukuran_asli": row["Ukuran_Asli_Byte"],
-                "ukuran_hasil": row["Ukuran_Hasil_Byte"],
+                "ukuran_asli": format_size_detail(result.plain_size),
+                "ukuran_hasil": format_size_detail(result.cipher_size),
                 "output": str(result.output_path),
                 "hash": row["Hash_SHA256_Asli"],
             }
@@ -828,8 +858,8 @@ class AffineApp(tk.Tk):
                 "entropi_plain": f"{result.entropy_plain:.4f}",
                 "cpu": data["CPU_Usage_Dekripsi_Persen"],
                 "ram": data["RAM_Usage_Dekripsi_MB"],
-                "ukuran_asli": str(result.cipher_size),
-                "ukuran_hasil": str(result.plain_size),
+                "ukuran_asli": format_size_detail(result.cipher_size),
+                "ukuran_hasil": format_size_detail(result.plain_size),
                 "output": str(result.output_path),
                 "hash": data["Hash_SHA256_Dekripsi"],
             }

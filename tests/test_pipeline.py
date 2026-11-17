@@ -1,8 +1,11 @@
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import pipeline
 from affine_cipher import encrypt_bytes
 from metrics import bit_difference
 from pipeline import (
@@ -114,6 +117,35 @@ class TestPipeline(unittest.TestCase):
                 [fraction for _, fraction in seen],
                 sorted(fraction for _, fraction in seen),
             )
+
+    def test_time_and_throughput_cover_whole_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "waktu.bin"
+            src.write_bytes(os.urandom(CHUNK_SIZE + 99))
+            original = pipeline._count_values
+
+            def slow_count(chunk):
+                time.sleep(0.05)  # mewakili biaya entropi yang ikut diukur
+                return original(chunk)
+
+            with mock.patch("pipeline._count_values", slow_count):
+                result = encrypt_file(src, Path(tmp) / "waktu.bin.enc", 7, 13)
+            self.assertGreaterEqual(result.elapsed_seconds, 0.05)
+            expected = (result.plain_size / (1024 * 1024)) / result.elapsed_seconds
+            self.assertAlmostEqual(result.throughput_mbps, expected, places=6)
+
+    def test_avalanche_time_is_not_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "kecil.bin"
+            src.write_bytes(b"a" * 4096)
+
+            def slow_avalanche(*args, **kwargs):
+                time.sleep(0.2)
+                return (0.0, 0.0)
+
+            with mock.patch("pipeline.measure_avalanche", slow_avalanche):
+                result = encrypt_file(src, Path(tmp) / "kecil.bin.enc", 7, 13)
+            self.assertLess(result.elapsed_seconds, 0.15)
 
     def test_no_part_file_left_behind(self):
         with tempfile.TemporaryDirectory() as tmp:
