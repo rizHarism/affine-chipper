@@ -5,7 +5,17 @@ from pathlib import Path
 
 from affine_cipher import encrypt_bytes
 from metrics import bit_difference
-from pipeline import CHUNK_SIZE, decrypt_file, encrypt_file, measure_avalanche, output_names
+from pipeline import (
+    CHUNK_SIZE,
+    STAGE_AVALANCHE,
+    STAGE_DONE,
+    STAGE_TRANSFORM,
+    TRANSFORM_SHARE,
+    decrypt_file,
+    encrypt_file,
+    measure_avalanche,
+    output_names,
+)
 
 
 class TestOutputNames(unittest.TestCase):
@@ -58,13 +68,52 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(r.plain_name, "tugas.pdf")
             self.assertEqual(r.plain_extension, "pdf")
 
-    def test_progress_reaches_one(self):
+    def test_progress_reports_every_stage_in_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / "p.bin"
             src.write_bytes(b"x" * (CHUNK_SIZE * 2 + 10))
             seen = []
-            encrypt_file(src, Path(tmp) / "p.bin.enc", 7, 13, progress=seen.append)
-            self.assertEqual(seen[-1], 1.0)
+            encrypt_file(
+                src,
+                Path(tmp) / "p.bin.enc",
+                7,
+                13,
+                progress=lambda stage, fraction: seen.append((stage, fraction)),
+            )
+            stages = [stage for stage, _ in seen]
+            self.assertIn(STAGE_TRANSFORM, stages)
+            self.assertIn(STAGE_AVALANCHE, stages)
+            self.assertEqual(seen[-1], (STAGE_DONE, 1.0))
+            fractions = [fraction for _, fraction in seen]
+            self.assertEqual(fractions, sorted(fractions))
+            self.assertGreaterEqual(min(fractions), 0.0)
+            self.assertLessEqual(max(fractions), 1.0)
+            # Pass transformasi berhenti di porsi yang disediakan, bukan 100%.
+            last_transform = max(
+                fraction for stage, fraction in seen if stage == STAGE_TRANSFORM
+            )
+            self.assertAlmostEqual(last_transform, TRANSFORM_SHARE)
+
+    def test_decrypt_progress_skips_avalanche(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "p.bin"
+            src.write_bytes(b"x" * (CHUNK_SIZE + 7))
+            enc = Path(tmp) / "p.bin.enc"
+            encrypt_file(src, enc, 7, 13)
+            seen = []
+            decrypt_file(
+                enc,
+                Path(tmp) / "p_decrypted.bin",
+                7,
+                13,
+                progress=lambda stage, fraction: seen.append((stage, fraction)),
+            )
+            self.assertEqual([stage for stage, _ in seen].count(STAGE_AVALANCHE), 0)
+            self.assertEqual(seen[-1], (STAGE_DONE, 1.0))
+            self.assertEqual(
+                [fraction for _, fraction in seen],
+                sorted(fraction for _, fraction in seen),
+            )
 
     def test_no_part_file_left_behind(self):
         with tempfile.TemporaryDirectory() as tmp:

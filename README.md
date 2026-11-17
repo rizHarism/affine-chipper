@@ -84,6 +84,31 @@ menyatakan bahwa hasil belum terverifikasi.
 Pemeriksaan tidak menambah baris baru: ia mengisi `Status_Hash_Cocok`, menambahkan
 metode pemeriksaan ke `Catatan_Pengujian`, dan menaikkan `Operasi` ke tahap verifikasi.
 
+### Tahap proses pada progress bar
+
+Selama operasi berjalan, teks di samping progress bar menyebut tahap yang sedang
+dikerjakan beserta persentase keseluruhan:
+
+| Tahap | Enkripsi | Dekripsi | Isi |
+|---|---|---|---|
+| `Membaca & mentransformasi potongan file` | 0–75% | 0–100% | Baca 4 MB → substitusi tabel → SHA-256 → hitung frekuensi byte → tulis hasil |
+| `Menghitung avalanche plainteks & kunci` | 75–100% | — | Baca file sekali lagi, enkripsi ulang dengan plainteks dimodifikasi dan dengan kunci `b ^ 0x01`, lalu hitung Hamming distance |
+| `Selesai` | 100% | 100% | Menyiapkan kartu hasil dan mencatat CSV |
+
+### Arti "waktu" dan "throughput" di kartu hasil
+
+`Waktu_Enkripsi_Detik` dan `Waktu_Dekripsi_Detik` **bukan** waktu tunggu total. Yang
+diukur hanya pass substitusi byte (`apply_table` per potongan 4 MB, dijumlahkan).
+Baca/tulis disk, SHA-256, penghitungan entropi, dan pass avalanche **tidak** dihitung.
+Throughput diturunkan dari waktu tersebut, jadi nilainya adalah kecepatan algoritma
+murni, bukan kecepatan aplikasi secara keseluruhan.
+
+Akibatnya, pada file besar angka waktu terlihat sangat kecil. Contoh pengukuran 400 MB:
+substitusi murni ±0,37 detik (±1000 MB/s), sedangkan total yang dirasakan pengguna
+±35 detik karena penghitungan entropi (`collections.Counter` di Python) dan pass
+avalanche jauh lebih mahal daripada cipher-nya. Ini sifat pengukuran yang disengaja,
+bukan bug; tulis di laporan bahwa yang dibandingkan adalah waktu algoritma.
+
 ## Urutan pengujian yang disarankan
 
 Untuk setiap file: **enkripsi → dekripsi → verifikasi**.

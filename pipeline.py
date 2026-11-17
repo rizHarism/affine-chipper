@@ -21,6 +21,18 @@ from metrics import (
 
 CHUNK_SIZE = 4 * 1024 * 1024
 
+#: Callback progres: ``(nama_tahap, fraksi_progres_keseluruhan)`` dengan fraksi 0.0-1.0.
+ProgressCallback = Callable[[str, float], None]
+
+STAGE_TRANSFORM = "Membaca & mentransformasi potongan file"
+STAGE_AVALANCHE = "Menghitung avalanche plainteks & kunci"
+STAGE_DONE = "Selesai"
+
+#: Porsi bilah progres untuk pass transformasi; sisanya untuk pass avalanche.
+#: Pada file besar pass avalanche membaca file sekali lagi dengan dua tabel,
+#: jadi bilah diberi ruang agar tidak terlihat berhenti di 75%.
+TRANSFORM_SHARE = 0.75
+
 
 @dataclass
 class TransformResult:
@@ -71,14 +83,19 @@ def _run(
     src: Path,
     dst: Path,
     table: bytes,
-    progress: Callable[[float], None] | None,
+    progress: ProgressCallback | None,
+    span: tuple[float, float] = (0.0, 1.0),
 ) -> tuple[int, int, float, int, float, str, str, float, float]:
     """Menjalankan transformasi streaming.
+
+    ``span`` menentukan porsi bilah progres yang dipakai pass ini, sehingga
+    tahap berikutnya (mis. avalanche) bisa melanjutkan dari posisi terakhir.
 
     Returns:
         (processed, output_size, seconds, entropy_input, entropy_output,
          hash_input, hash_output, cpu, ram)
     """
+    span_start, span_end = span
     source_size = src.stat().st_size
     hash_in = Sha256Accumulator()
     hash_out = Sha256Accumulator()
@@ -114,7 +131,8 @@ def _run(
                 handle_out.write(transformed)
                 processed += len(chunk)
                 if progress is not None and source_size:
-                    progress(processed / source_size)
+                    fraction = span_start + (span_end - span_start) * processed / source_size
+                    progress(STAGE_TRANSFORM, fraction)
         os.replace(temporary, dst)
     except BaseException:
         try:
@@ -125,7 +143,7 @@ def _run(
         raise
 
     if progress is not None:
-        progress(1.0)
+        progress(STAGE_TRANSFORM, span_end)
 
     return (
         processed,
@@ -140,11 +158,17 @@ def _run(
     )
 
 
-def measure_avalanche(src: Path, a: int, b: int) -> tuple[float | None, float | None]:
+def measure_avalanche(
+    src: Path,
+    a: int,
+    b: int,
+    progress: Callable[[float], None] | None = None,
+) -> tuple[float | None, float | None]:
     """Menghitung avalanche plainteks dan kunci dalam persen (streaming).
 
     Pass plainteks: byte pertama di-XOR 0x01. Pass kunci: ``b' = b ^ 0x01``.
-    Kedua pass tidak masuk hitungan ``transform_seconds``.
+    Kedua pass tidak masuk hitungan ``transform_seconds``. Bila ``progress``
+    diberikan, ia menerima fraksi 0.0-1.0 khusus pass ini.
     """
     source_size = src.stat().st_size
     if source_size == 0:
@@ -155,6 +179,7 @@ def measure_avalanche(src: Path, a: int, b: int) -> tuple[float | None, float | 
     diff_plain = 0
     diff_key = 0
     first_chunk = True
+    processed = 0
 
     with open(src, "rb") as handle:
         while True:
@@ -169,6 +194,9 @@ def measure_avalanche(src: Path, a: int, b: int) -> tuple[float | None, float | 
             original = apply_table(chunk, table)
             diff_plain += bit_difference(original, apply_table(flipped, table))
             diff_key += bit_difference(original, apply_table(chunk, key_table))
+            processed += len(chunk)
+            if progress is not None:
+                progress(processed / source_size)
 
     total_bits = source_size * 8
     return (diff_plain / total_bits * 100, diff_key / total_bits * 100)
@@ -179,14 +207,24 @@ def encrypt_file(
     dst: Path,
     a: int,
     b: int,
-    progress: Callable[[float], None] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> TransformResult:
     """Mengenkripsi ``src`` ke ``dst`` per potongan dan mengembalikan metriknya."""
     table = build_encrypt_table(a, b)
+
+    def avalanche_progress(fraction: float) -> None:
+        assert progress is not None
+        progress(STAGE_AVALANCHE, TRANSFORM_SHARE + (1.0 - TRANSFORM_SHARE) * fraction)
+
     plain_size, cipher_size, seconds, entropy_plain, entropy_cipher, hash_plain, hash_cipher, cpu, ram = _run(
-        src, dst, table, progress
+        src, dst, table, progress, span=(0.0, TRANSFORM_SHARE)
     )
-    avalanche_plain, avalanche_key = measure_avalanche(src, a, b)
+    avalanche_plain, avalanche_key = measure_avalanche(
+        src, a, b, progress=avalanche_progress if progress is not None else None
+    )
+    if progress is not None:
+        progress(STAGE_DONE, 1.0)
+
     plain_name, plain_extension = _plain_identity(src)
     return TransformResult(
         plain_name=plain_name,
@@ -212,13 +250,16 @@ def decrypt_file(
     dst: Path,
     a: int,
     b: int,
-    progress: Callable[[float], None] | None = None,
+    progress: ProgressCallback | None = None,
 ) -> TransformResult:
     """Mendekripsi ``src`` ke ``dst`` per potongan dan mengembalikan metriknya."""
     table = build_decrypt_table(a, b)
     cipher_size, plain_size, seconds, entropy_cipher, entropy_plain, hash_cipher, hash_plain, cpu, ram = _run(
         src, dst, table, progress
     )
+    if progress is not None:
+        progress(STAGE_DONE, 1.0)
+
     plain_name, plain_extension = _plain_identity(src)
     return TransformResult(
         plain_name=plain_name,

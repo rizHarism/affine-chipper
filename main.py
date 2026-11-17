@@ -30,10 +30,14 @@ from pipeline import TransformResult
 APP_TITLE = "Affine Cipher — Enkripsi & Dekripsi File"
 DEFAULT_A = "7"
 DEFAULT_B = "13"
+TIME_HINT = (
+    "Waktu & throughput yang dicatat hanya menghitung pass transformasi byte "
+    "murni (tanpa baca/tulis disk, hash, entropi, dan avalanche)."
+)
 
 ENCRYPT_FIELDS: tuple[tuple[str, str], ...] = (
-    ("waktu", "Waktu enkripsi (detik)"),
-    ("throughput", "Throughput (MB/s)"),
+    ("waktu", "Waktu enkripsi (detik, algoritma)"),
+    ("throughput", "Throughput (MB/s, algoritma)"),
     ("entropi_plain", "Entropi plainteks"),
     ("entropi_cipher", "Entropi cipherteks"),
     ("avalanche_plain", "Avalanche plainteks (%)"),
@@ -47,8 +51,8 @@ ENCRYPT_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 DECRYPT_FIELDS: tuple[tuple[str, str], ...] = (
-    ("waktu", "Waktu dekripsi (detik)"),
-    ("throughput", "Throughput (MB/s)"),
+    ("waktu", "Waktu dekripsi (detik, algoritma)"),
+    ("throughput", "Throughput (MB/s, algoritma)"),
     ("entropi_cipher", "Entropi cipherteks"),
     ("entropi_plain", "Entropi plainteks"),
     ("cpu", "CPU (persen)"),
@@ -118,13 +122,13 @@ class TransformWorker(threading.Thread):
         self._dst = dst
         self._a = a
         self._b = b
-        self._last_percent = -1
+        self._last_marker: tuple[str, int] | None = None
 
-    def _progress(self, fraction: float) -> None:
-        percent = int(fraction * 100)
-        if percent != self._last_percent:
-            self._last_percent = percent
-            self._emit(("progress", fraction))
+    def _progress(self, stage: str, fraction: float) -> None:
+        marker = (stage, int(fraction * 100))
+        if marker != self._last_marker:
+            self._last_marker = marker
+            self._emit(("progress", (stage, fraction)))
 
     def run(self) -> None:
         try:
@@ -450,9 +454,12 @@ class AffineApp(tk.Tk):
         ttk.Label(tab, textvariable=self.encrypt_status, foreground="#333333").grid(
             row=4, column=0, sticky="w", pady=(6, 0)
         )
+        ttk.Label(
+            tab, text=TIME_HINT, foreground="#666666", wraplength=880, justify="left"
+        ).grid(row=5, column=0, sticky="w", pady=(2, 0))
 
         self.encrypt_cards = ResultCards(tab, "Hasil Enkripsi", ENCRYPT_FIELDS)
-        self.encrypt_cards.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        self.encrypt_cards.grid(row=6, column=0, sticky="ew", pady=(12, 0))
 
     def _build_decrypt_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=12)
@@ -481,9 +488,12 @@ class AffineApp(tk.Tk):
         ttk.Label(tab, textvariable=self.decrypt_status, foreground="#333333").grid(
             row=4, column=0, sticky="w", pady=(6, 0)
         )
+        ttk.Label(
+            tab, text=TIME_HINT, foreground="#666666", wraplength=880, justify="left"
+        ).grid(row=5, column=0, sticky="w", pady=(2, 0))
 
         self.decrypt_cards = ResultCards(tab, "Hasil Dekripsi", DECRYPT_FIELDS)
-        self.decrypt_cards.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        self.decrypt_cards.grid(row=6, column=0, sticky="ew", pady=(12, 0))
 
     def _build_verify_tab(self) -> None:
         tab = ttk.Frame(self.notebook, padding=12)
@@ -615,7 +625,8 @@ class AffineApp(tk.Tk):
         if job is None:
             return
         if kind == "progress":
-            self._handle_progress(float(payload))  # type: ignore[arg-type]
+            stage, fraction = payload  # type: ignore[misc]
+            self._handle_progress(str(stage), float(fraction))
             return
         if kind == "error":
             operation = str(job["operation"])
@@ -646,21 +657,17 @@ class AffineApp(tk.Tk):
         else:
             self._finish_decrypt(result, job)
 
-    def _handle_progress(self, fraction: float) -> None:
+    def _handle_progress(self, stage: str, fraction: float) -> None:
         job = self._job
         if job is None:
             return
         encrypting = job["operation"] == "encrypt"
         widget = self.encrypt_progress if encrypting else self.decrypt_progress
         widget["value"] = fraction * 100
-        name = Path(str(job["src"])).name
-        if fraction >= 1.0:
-            if encrypting:
-                self._set_status("Transformasi selesai, menghitung avalanche…")
-            else:
-                self._set_status("Transformasi selesai, menyiapkan hasil…")
+        if stage == pipeline.STAGE_DONE:
+            self._set_status("Menyiapkan hasil dan mencatat CSV…")
         else:
-            self._set_status(f"Memproses {name}… {fraction * 100:.0f}%")
+            self._set_status(f"{stage}… {fraction * 100:.0f}%")
 
     def _set_status(self, text: str, operation: str | None = None) -> None:
         if operation is None:
